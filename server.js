@@ -19,6 +19,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ---------- 路徑與資料庫設定 ----------
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'app.db');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -52,19 +53,25 @@ app.use(cors({
     "https://mogamiyuki010.github.io",
     "https://mogamiyuki010.github.io/mindtest",
     "http://localhost:3000",
-    "https://localhost:3000"
+    "http://localhost:5173",
+    "https://mindtest-backend.onrender.com"
   ],
-  methods: ["GET", "POST", "PUT", "DELETE"],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   credentials: true
 }));
 
 app.use(cookieParser());
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '2mb' }));
 
 // 自動生成 session_id
 app.use((req, res, next) => {
   if (!req.cookies.session_id) {
-    res.cookie('session_id', nanoid(), { maxAge: 10 * 24 * 3600 * 1000, httpOnly: true });
+    res.cookie('session_id', nanoid(), {
+      maxAge: 10 * 24 * 3600 * 1000,
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: true
+    });
   }
   next();
 });
@@ -122,7 +129,7 @@ app.get('/api/events', (req, res) => {
     }));
     res.json(items);
   } catch (err) {
-    console.error(err);
+    console.error('❌ /api/events error', err);
     res.status(500).json({ error: 'Failed to fetch events.' });
   }
 });
@@ -148,12 +155,12 @@ app.get('/api/results', (req, res) => {
     }));
     res.json(items);
   } catch (err) {
-    console.error(err);
+    console.error('❌ /api/results error', err);
     res.status(500).json({ error: 'Failed to fetch results.' });
   }
 });
 
-// 接收事件
+// 接收事件（新版 /api/events）
 app.post('/api/events', (req, res) => {
   try {
     const now = new Date().toISOString();
@@ -161,6 +168,7 @@ app.post('/api/events', (req, res) => {
     const session_id = req.cookies.session_id;
     const body = req.body || {};
     const items = Array.isArray(body.batch) ? body.batch : [body];
+
     const insertMany = db.transaction((arr) => {
       for (const it of arr) {
         stInsertEvent.run({
@@ -169,20 +177,20 @@ app.post('/api/events', (req, res) => {
           session_id,
           ip: String(ip),
           page: String(it.page || ''),
-          type: String(it.type || 'custom'),
-          payload: JSON.stringify(it.payload || {})
+          type: String(it.event || it.type || 'custom'),
+          payload: JSON.stringify(it)
         });
       }
     });
     insertMany(items);
     res.json({ ok: true, inserted: items.length });
   } catch (err) {
-    console.error(err);
+    console.error('❌ insert /api/events error', err);
     res.status(500).json({ error: 'Failed to insert events.' });
   }
 });
 
-// 儲存測驗結果
+// 儲存測驗結果（/api/results）
 app.post('/api/results', (req, res) => {
   try {
     const now = new Date().toISOString();
@@ -197,14 +205,37 @@ app.post('/api/results', (req, res) => {
     });
     res.json({ ok: true });
   } catch (err) {
-    console.error(err);
+    console.error('❌ insert /api/results error', err);
     res.status(500).json({ error: 'Failed to insert result.' });
+  }
+});
+
+// 向後相容舊版 /api/track
+app.post('/api/track', (req, res) => {
+  try {
+    const now = new Date().toISOString();
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+    const session_id = req.cookies.session_id;
+    const body = req.body || {};
+    stInsertEvent.run({
+      id: nanoid(),
+      ts: now,
+      session_id,
+      ip: String(ip),
+      page: String(body.properties?.page || ''),
+      type: String(body.event || 'track'),
+      payload: JSON.stringify(body)
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('❌ /api/track error', err);
+    res.status(500).json({ error: 'Failed to insert track event.' });
   }
 });
 
 // ---------- 根路由 ----------
 app.get('/', (req, res) => {
-  res.send('Backend is running ✅');
+  res.send('🟢 MindTest Backend is running on Render ✅');
 });
 
 // ---------- 啟動 ----------
