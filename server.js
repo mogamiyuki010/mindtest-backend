@@ -208,6 +208,6 @@ app.get('/', (req, res) => {
 });
 
 // ---------- 啟動 ----------
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
