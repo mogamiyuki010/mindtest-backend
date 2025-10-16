@@ -1,228 +1,224 @@
-// === server.js ===
-// 完整支援 Render / 本地 / GitHub Pages 的版本
-
+// ============================
+// ✅ server.js 最終整合版
+// ============================
 import express from "express";
-import cors from "cors";
 import cookieParser from "cookie-parser";
+import cors from "cors";
+import { nanoid } from "nanoid";
 import dayjs from "dayjs";
+import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
-import { nanoid } from "nanoid";
-import Database from "better-sqlite3";
+import { fileURLToPath } from "url";
+import isSameOrBefore from "dayjs/plugin/isSameOrBefore.js";
+import isSameOrAfter from "dayjs/plugin/isSameOrAfter.js";
+dayjs.extend(isSameOrBefore);
+dayjs.extend(isSameOrAfter);
+
+// ---------- 環境設定 ----------
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-// 🧩 使用 process.cwd() 確保 Render 可寫入
-const DATA_DIR = path.join(process.cwd(), "data");
-const DB_PATH = path.join(DATA_DIR, "app.db");
-
-// 確保資料夾存在
+// ---------- 資料庫設定 ----------
+const DATA_DIR = path.join(__dirname, "data");
+const DB_FILE = path.join(DATA_DIR, "app.db");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// 初始化 DB
-const db = new Database(DB_PATH);
+const db = new Database(DB_FILE);
+db.pragma("journal_mode = WAL");
+db.pragma("synchronous = NORMAL");
+db.exec(`
+  CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    session_id TEXT,
+    ip TEXT,
+    page TEXT,
+    type TEXT,
+    payload TEXT
+  );
+  CREATE TABLE IF NOT EXISTS results (
+    id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    session_id TEXT,
+    result_name TEXT,
+    score_json TEXT
+  );
+`);
 
-// === 建立資料表 ===
-db.prepare(`
-CREATE TABLE IF NOT EXISTS events (
-  id TEXT PRIMARY KEY,
-  ts TEXT,
-  session_id TEXT,
-  ip TEXT,
-  page TEXT,
-  type TEXT,
-  payload TEXT
-);
-`).run();
+// ---------- 中介層 ----------
+app.use(cors({
+  origin: [
+    "https://mogamiyuki010.github.io",
+    "https://mogamiyuki010.github.io/mindtest",
+    "http://localhost:3000",
+    "http://127.0.0.1:5500"
+  ],
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true
+}));
 
-db.prepare(`
-CREATE TABLE IF NOT EXISTS results (
-  id TEXT PRIMARY KEY,
-  ts TEXT,
-  session_id TEXT,
-  result_name TEXT,
-  scores TEXT
-);
-`).run();
-
-// === Middleware ===
-app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
-app.use(
-  cors({
-    origin: ["https://mogamiyuki010.github.io", "http://localhost:5500"],
-    credentials: true,
-  })
-);
+app.use(express.json({ limit: "1mb" }));
 
-// === Session Cookie ===
+// ✅ 提供靜態檔案（前端 HTML / JS）
+app.use(express.static(__dirname));
+
+// ---------- Cookie：自動建立 session ----------
 app.use((req, res, next) => {
   if (!req.cookies.session_id) {
-    res.cookie("session_id", `sess_${Date.now()}_${nanoid(6)}`, {
-      httpOnly: false,
-      sameSite: "lax",
-      secure: false,
+    res.cookie("session_id", nanoid(), {
+      maxAge: 10 * 24 * 3600 * 1000,
+      httpOnly: true,
     });
   }
   next();
 });
 
-// === INSERT statements ===
+// ---------- 預備語句 ----------
 const stInsertEvent = db.prepare(`
-INSERT INTO events (id, ts, session_id, ip, page, type, payload)
-VALUES (@id, @ts, @session_id, @ip, @page, @type, @payload);
+  INSERT INTO events (id, ts, session_id, ip, page, type, payload)
+  VALUES (@id, @ts, @session_id, @ip, @page, @type, @payload)
 `);
-
 const stInsertResult = db.prepare(`
-INSERT INTO results (id, ts, session_id, result_name, scores)
-VALUES (@id, @ts, @session_id, @result_name, @scores);
+  INSERT INTO results (id, ts, session_id, result_name, score_json)
+  VALUES (@id, @ts, @session_id, @result_name, @score_json)
+`);
+const stQueryEvents = db.prepare(`
+  SELECT * FROM events
+  WHERE (@start IS NULL OR ts >= @start)
+    AND (@end IS NULL OR ts <= @end)
+  ORDER BY ts DESC
+  LIMIT @limit OFFSET @offset
+`);
+const stQueryResults = db.prepare(`
+  SELECT * FROM results
+  WHERE (@start IS NULL OR ts >= @start)
+    AND (@end IS NULL OR ts <= @end)
+  ORDER BY ts DESC
+  LIMIT @limit OFFSET @offset
 `);
 
-// === API: 健康檢查 ===
+// ---------- API 區 ----------
+
+// 健康檢查
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
 
-// === API: 接收事件批次 ===
+// 查詢事件
+app.get("/api/events", (req, res) => {
+  try {
+    const { start = null, end = null, page = 1, pageSize = 100 } = req.query;
+    const limit = Math.min(Number(pageSize) || 100, 500);
+    const offset = (Number(page) - 1) * limit;
+    const params = {
+      start: start ? dayjs(start).startOf("day").toISOString() : null,
+      end: end ? dayjs(end).endOf("day").toISOString() : null,
+      limit,
+      offset,
+    };
+    const items = stQueryEvents.all(params).map((r) => ({
+      id: r.id,
+      timestamp: r.ts,
+      event_name: r.type,
+      session_id: r.session_id,
+      page: r.page,
+      properties: r.payload ? JSON.parse(r.payload) : {},
+    }));
+    res.json(items);
+  } catch (err) {
+    console.error("❌ /api/events error:", err);
+    res.status(500).json({ error: "Failed to fetch events." });
+  }
+});
+
+// 查詢結果
+app.get("/api/results", (req, res) => {
+  try {
+    const { start = null, end = null, page = 1, pageSize = 100 } = req.query;
+    const limit = Math.min(Number(pageSize) || 100, 500);
+    const offset = (Number(page) - 1) * limit;
+    const params = {
+      start: start ? dayjs(start).startOf("day").toISOString() : null,
+      end: end ? dayjs(end).endOf("day").toISOString() : null,
+      limit,
+      offset,
+    };
+    const items = stQueryResults.all(params).map((r) => ({
+      id: r.id,
+      timestamp: r.ts,
+      session_id: r.session_id,
+      result: r.result_name,
+      scores: r.score_json ? JSON.parse(r.score_json) : {},
+    }));
+    res.json(items);
+  } catch (err) {
+    console.error("❌ /api/results error:", err);
+    res.status(500).json({ error: "Failed to fetch results." });
+  }
+});
+
+// 接收事件
 app.post("/api/events", (req, res) => {
-  try {
-    const { batch = [] } = req.body || {};
-    const now = new Date().toISOString();
-    const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
-    const session_id = req.cookies.session_id || "";
-
-    const insert = db.transaction((events) => {
-      for (const e of events) {
-        stInsertEvent.run({
-          id: nanoid(),
-          ts: e.ts || now,
-          session_id: e.sessionId || session_id,
-          ip: String(ip),
-          page: String(e.page || ""),
-          type: String(e.event || "custom"),
-          payload: JSON.stringify(e.properties || {}),
-        });
-      }
-    });
-    insert(batch);
-
-    res.json({ ok: true, count: batch.length });
-  } catch (err) {
-    console.error("POST /api/events Error:", err);
-    res.status(500).json({ error: "Failed to insert events." });
-  }
-});
-
-// === API: 儲存測驗結果 ===
-app.post("/api/results", (req, res) => {
-  try {
-    const { result_name, scores } = req.body;
-    const now = new Date().toISOString();
-    const session_id = req.cookies.session_id || "";
-    stInsertResult.run({
-      id: nanoid(),
-      ts: now,
-      session_id,
-      result_name: result_name || "unknown",
-      scores: JSON.stringify(scores || {}),
-    });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("POST /api/results Error:", err);
-    res.status(500).json({ error: "Failed to save result." });
-  }
-});
-
-// === API: fallback /api/track ===
-app.post("/api/track", (req, res) => {
   try {
     const now = new Date().toISOString();
     const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
     const session_id = req.cookies.session_id;
     const body = req.body || {};
+    const items = Array.isArray(body.batch) ? body.batch : [body];
 
-    stInsertEvent.run({
+    const insertMany = db.transaction((arr) => {
+      for (const it of arr) {
+        stInsertEvent.run({
+          id: nanoid(),
+          ts: now,
+          session_id,
+          ip: String(ip),
+          page: String(it.page || ""),
+          type: String(it.event || it.type || "custom"),
+          payload: JSON.stringify(it.properties || it.payload || {}),
+        });
+      }
+    });
+    insertMany(items);
+
+    res.json({ ok: true, inserted: items.length });
+  } catch (err) {
+    console.error("❌ /api/events insert error:", err);
+    res.status(500).json({ error: "Failed to insert events." });
+  }
+});
+
+// 儲存測驗結果
+app.post("/api/results", (req, res) => {
+  try {
+    const now = new Date().toISOString();
+    const session_id = req.cookies.session_id;
+    const { result_name = "", scores = {} } = req.body || {};
+    stInsertResult.run({
       id: nanoid(),
       ts: now,
       session_id,
-      ip: String(ip),
-      page: String(body.page || ""),
-      type: String(body.event || "custom"),
-      payload: JSON.stringify(body.properties || {}),
+      result_name: String(result_name),
+      score_json: JSON.stringify(scores),
     });
     res.json({ ok: true });
   } catch (err) {
-    console.error("POST /api/track Error:", err);
-    res.status(500).json({ error: "Failed to insert track." });
+    console.error("❌ /api/results insert error:", err);
+    res.status(500).json({ error: "Failed to insert result." });
   }
 });
 
-// === API: Dashboard 總覽 ===
-app.get("/api/dashboard", (req, res) => {
-  try {
-    const today = dayjs().startOf("day").toISOString();
-    const totalEvents = db.prepare(`SELECT COUNT(*) AS count FROM events`).all();
-    const totalUsers = db.prepare(`SELECT COUNT(DISTINCT session_id) AS count FROM events`).all();
-    const totalSessions = db.prepare(`SELECT COUNT(DISTINCT session_id) AS count FROM events`).all();
-    const todayEvents = db.prepare(`SELECT COUNT(*) AS count FROM events WHERE ts >= ?`).all(today);
-    const todayUsers = db.prepare(`SELECT COUNT(DISTINCT session_id) AS count FROM events WHERE ts >= ?`).all(today);
-
-    const topEvents = db
-      .prepare(`SELECT type AS event_name, COUNT(*) AS count FROM events GROUP BY type ORDER BY count DESC LIMIT 5`)
-      .all();
-
-    const pageViews = db
-      .prepare(`SELECT page, COUNT(*) AS count FROM events WHERE page != '' GROUP BY page ORDER BY count DESC LIMIT 5`)
-      .all();
-
-    const quizResults = db
-      .prepare(`SELECT result_name AS result, COUNT(*) AS count FROM results GROUP BY result_name`)
-      .all();
-
-    const hourlyEvents = db
-      .prepare(`SELECT substr(ts, 12, 2) AS hour, COUNT(*) AS count FROM events GROUP BY hour ORDER BY hour ASC`)
-      .all();
-
-    res.json({
-      totalEvents,
-      totalUsers,
-      totalSessions,
-      todayEvents,
-      todayUsers,
-      topEvents,
-      pageViews,
-      quizResults,
-      hourlyEvents,
-    });
-  } catch (err) {
-    console.error("GET /api/dashboard Error:", err);
-    res.status(500).json({ error: "Failed to load dashboard data." });
-  }
+// ---------- 根路由 ----------
+app.get("/", (req, res) => {
+  res.send("✅ MindTest backend running successfully!");
 });
 
-// === API: Realtime ===
-app.get("/api/realtime", (req, res) => {
-  try {
-    const fiveMinAgo = dayjs().subtract(5, "minute").toISOString();
-    const recentEvents = db.prepare(`SELECT COUNT(*) AS count FROM events WHERE ts >= ?`).all(fiveMinAgo);
-    const onlineUsers = db
-      .prepare(`SELECT COUNT(DISTINCT session_id) AS count FROM events WHERE ts >= ?`)
-      .all(fiveMinAgo);
-    const recentEventList = db
-      .prepare(
-        `SELECT ts AS timestamp, type AS event_name, session_id AS user_id, page 
-         FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT 10`
-      )
-      .all(fiveMinAgo);
-    res.json({ recentEvents, onlineUsers, recentEventList });
-  } catch (err) {
-    console.error("GET /api/realtime Error:", err);
-    res.status(500).json({ error: "Failed to load realtime data." });
-  }
-});
-
-// === 啟動伺服器 ===
-const PORT = process.env.PORT || 3000;
-app.listen(PORT,"0.0.0.0", () => {
-  console.log(`✅ Server running on port ${PORT}`);
+// ---------- 啟動 ----------
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
