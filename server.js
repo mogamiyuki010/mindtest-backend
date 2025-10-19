@@ -326,7 +326,39 @@ app.get('/api/dashboard', (req, res) => {
     }
 });
 
-// ✅ 6. 實時數據 API (GET /api/realtime) - 供 dashboard.html 使用
+// ✅ 6. 獲取用戶測驗結果 API (GET /api/user-results) - 根據 session_id 獲取用戶的測驗結果
+app.get('/api/user-results', (req, res) => {
+    try {
+        const session_id = req.cookies.session_id;
+        if (!session_id) {
+            return res.status(400).json({ error: 'Session ID required' });
+        }
+
+        const userResults = db.prepare(`
+            SELECT * FROM results 
+            WHERE session_id = ? 
+            ORDER BY ts DESC
+        `).all(session_id);
+
+        const formattedResults = userResults.map(r => ({
+            id: r.id,
+            timestamp: r.ts,
+            result_name: r.result_name,
+            scores: r.score_json ? JSON.parse(r.score_json) : {}
+        }));
+
+        res.json({
+            session_id,
+            results: formattedResults,
+            total: formattedResults.length
+        });
+    } catch (error) {
+        console.error("Error fetching user results:", error.message);
+        res.status(500).json({ error: 'Failed to fetch user results.' });
+    }
+});
+
+// ✅ 7. 實時數據 API (GET /api/realtime) - 供 dashboard.html 使用
 app.get('/api/realtime', (req, res) => {
     try {
         const fiveMinutesAgo = dayjs().subtract(5, 'minute').toISOString();
@@ -369,53 +401,25 @@ app.get('/api/realtime', (req, res) => {
     }
 });
 
-// ---------- 頁面路由 ----------
-// 首頁
-app.get('/', (req, res) => {
-    res.sendFile(path.join(ROOT_DIR, 'index.html'));
-});
+// ---------- 頁面路由（已移除 - 使用前後端分離架構）----------
+// 前端頁面由 GitHub Pages 提供
+// 後端只提供 API 服務
 
-// 測驗頁面
-app.get('/quiz', (req, res) => {
-    res.sendFile(path.join(ROOT_DIR, 'quiz.html'));
-});
-
-// 結果頁面
-app.get('/result', (req, res) => {
-    res.sendFile(path.join(ROOT_DIR, 'result.html'));
-});
-
-// Dashboard 監控頁面
-app.get('/dashboard', (req, res) => {
-    res.sendFile(path.join(ROOT_DIR, 'dashboard.html'));
-});
-
-// 後台管理頁面
-app.get('/admin', (req, res) => {
-    res.sendFile(path.join(ROOT_DIR, 'admin.html'));
-});
-
-// 測試頁面
-app.get('/test', (req, res) => {
-    res.sendFile(path.join(ROOT_DIR, 'test.html'));
-});
-
-// ---------- 靜態文件服務 (必須在 API 路由之後) ----------
-app.use(express.static(ROOT_DIR));
-app.use('/public', express.static(PUBLIC_DIR));
+// ---------- 靜態文件服務（已移除 - 使用前後端分離架構）----------
+// 靜態文件由 GitHub Pages 提供
+// 後端只提供 API 服務
 
 // ---------- 啟動伺服器 ----------
 app.listen(PORT, () => {
     console.log(`\n======================================================`);
-    console.log(`✅ Server running at http://localhost:${PORT}`);
+    console.log(`✅ API Server running at http://localhost:${PORT}`);
     console.log(`📂 DB File: ${DB_FILE}`);
-    console.log(`\n📄 可用頁面:`);
-    console.log(`   • 首頁: http://localhost:${PORT}/`);
-    console.log(`   • 測驗: http://localhost:${PORT}/quiz`);
-    console.log(`   • 結果: http://localhost:${PORT}/result`);
-    console.log(`   • 監控: http://localhost:${PORT}/dashboard`);
-    console.log(`   • 管理: http://localhost:${PORT}/admin`);
-    console.log(`   • 測試: http://localhost:${PORT}/test`);
+    console.log(`\n🌐 前端頁面（GitHub Pages）:`);
+    console.log(`   • 首頁: https://mogamiyuki010.github.io/mindtest/`);
+    console.log(`   • 測驗: https://mogamiyuki010.github.io/mindtest/quiz.html`);
+    console.log(`   • 結果: https://mogamiyuki010.github.io/mindtest/result.html`);
+    console.log(`   • 監控: https://mogamiyuki010.github.io/mindtest/dashboard.html`);
+    console.log(`   • 管理: https://mogamiyuki010.github.io/mindtest/admin.html`);
     console.log(`\n🔧 API 端點:`);
     console.log(`   • 健康檢查: http://localhost:${PORT}/api/health`);
     console.log(`   • 事件查詢: http://localhost:${PORT}/api/events`);
