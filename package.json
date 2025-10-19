@@ -32,5 +32,8 @@
         "dayjs": "^1.11.13",
         "express": "^4.21.2",
         "nanoid": "^5.1.6"
+    },
+    "optionalDependencies": {
+        "sqlite3": "^5.1.6"
     }
 }
