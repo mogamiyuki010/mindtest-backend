@@ -7,6 +7,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { supabase, TABLES, initSupabaseTables } from './supabase-config.js';
 
 // 導入 dayjs 的擴充功能，用於處理日期範圍查詢
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore.js';
@@ -34,6 +35,12 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new Database(DB_FILE, { verbose: (message) => { /* console.log(message) */ } });
 db.pragma('journal_mode = WAL'); 
 db.pragma('synchronous = NORMAL');
+
+// 初始化 Supabase（如果配置了環境變數）
+if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
+  console.log('🔄 初始化 Supabase 連接...');
+  initSupabaseTables();
+}
 
 // 創建表格
 db.exec(`
@@ -106,6 +113,109 @@ const stQueryResults = db.prepare(`
     ORDER BY ts DESC
     LIMIT @limit OFFSET @offset
 `);
+
+// ---------- Supabase 數據操作函數 ----------
+const supabaseOps = {
+  // 插入事件到 Supabase
+  async insertEvent(eventData) {
+    if (!process.env.SUPABASE_URL) return;
+    try {
+      const { error } = await supabase
+        .from(TABLES.EVENTS)
+        .insert([{
+          id: eventData.id,
+          ts: eventData.ts,
+          session_id: eventData.session_id,
+          ip: eventData.ip,
+          page: eventData.page,
+          type: eventData.type,
+          payload: eventData.payload
+        }]);
+      if (error) throw error;
+    } catch (error) {
+      console.error('Supabase 插入事件失敗:', error);
+    }
+  },
+
+  // 插入結果到 Supabase
+  async insertResult(resultData) {
+    if (!process.env.SUPABASE_URL) return;
+    try {
+      const { error } = await supabase
+        .from(TABLES.RESULTS)
+        .insert([{
+          id: resultData.id,
+          ts: resultData.ts,
+          session_id: resultData.session_id,
+          result_name: resultData.result_name,
+          score_json: resultData.score_json
+        }]);
+      if (error) throw error;
+    } catch (error) {
+      console.error('Supabase 插入結果失敗:', error);
+    }
+  },
+
+  // 從 Supabase 查詢事件
+  async queryEvents(params) {
+    if (!process.env.SUPABASE_URL) return [];
+    try {
+      let query = supabase.from(TABLES.EVENTS).select('*');
+      
+      if (params.start) query = query.gte('ts', params.start);
+      if (params.end) query = query.lte('ts', params.end);
+      
+      const { data, error } = await query
+        .order('ts', { ascending: false })
+        .range(params.offset, params.offset + params.limit - 1);
+      
+      if (error) throw error;
+      return data || [];
+    } catch (error) {
+      console.error('Supabase 查詢事件失敗:', error);
+      return [];
+    }
+  },
+
+  // 從 Supabase 查詢結果
+  async queryResults(params) {
+    if (!process.env.SUPABASE_URL) return [];
+    try {
+      let query = supabase.from(TABLES.RESULTS).select('*');
+      
+      if (params.start) query = query.gte('ts', params.start);
+      if (params.end) query = query.lte('ts', params.end);
+      
+      const { data, error } = await query
+        .order('ts', { ascending: false })
+        .range(params.offset, params.offset + params.limit - 1);
+      
+      if (error) throw error;
+      return data || [];
+    } catch (error) {
+      console.error('Supabase 查詢結果失敗:', error);
+      return [];
+    }
+  },
+
+  // 從 Supabase 獲取用戶結果
+  async getUserResults(sessionId) {
+    if (!process.env.SUPABASE_URL) return [];
+    try {
+      const { data, error } = await supabase
+        .from(TABLES.RESULTS)
+        .select('*')
+        .eq('session_id', sessionId)
+        .order('ts', { ascending: false });
+      
+      if (error) throw error;
+      return data || [];
+    } catch (error) {
+      console.error('Supabase 獲取用戶結果失敗:', error);
+      return [];
+    }
+  }
+};
 
 // ---------- API 路由定義 ----------
 
@@ -200,7 +310,7 @@ app.post('/api/events', (req, res) => {
                 const type = it.type || it.event || (it.properties?.event) || 'custom';
                 const payload = it.payload || it.properties || {};
 
-                stInsertEvent.run({
+                const eventData = {
                     id: nanoid(),
                     ts: now,
                     session_id,
@@ -208,7 +318,13 @@ app.post('/api/events', (req, res) => {
                     page: String(page),
                     type: String(type),
                     payload: JSON.stringify(payload)
-                });
+                };
+
+                // 寫入 SQLite
+                stInsertEvent.run(eventData);
+
+                // 同時寫入 Supabase
+                supabaseOps.insertEvent(eventData);
             }
         });
 
@@ -227,13 +343,19 @@ app.post('/api/results', (req, res) => {
         const session_id = req.cookies.session_id;
         const { result_name = '', scores = {} } = req.body || {};
 
-        stInsertResult.run({
+        const resultData = {
             id: nanoid(),
             ts: now,
             session_id,
             result_name: String(result_name),
             score_json: JSON.stringify(scores)
-        });
+        };
+
+        // 寫入 SQLite
+        stInsertResult.run(resultData);
+
+        // 同時寫入 Supabase
+        supabaseOps.insertResult(resultData);
 
         res.json({ ok: true });
     } catch (error) {
@@ -327,25 +449,45 @@ app.get('/api/dashboard', (req, res) => {
 });
 
 // ✅ 6. 獲取用戶測驗結果 API (GET /api/user-results) - 根據 session_id 獲取用戶的測驗結果
-app.get('/api/user-results', (req, res) => {
+app.get('/api/user-results', async (req, res) => {
     try {
         const session_id = req.cookies.session_id;
         if (!session_id) {
             return res.status(400).json({ error: 'Session ID required' });
         }
 
-        const userResults = db.prepare(`
-            SELECT * FROM results 
-            WHERE session_id = ? 
-            ORDER BY ts DESC
-        `).all(session_id);
+        let formattedResults = [];
 
-        const formattedResults = userResults.map(r => ({
-            id: r.id,
-            timestamp: r.ts,
-            result_name: r.result_name,
-            scores: r.score_json ? JSON.parse(r.score_json) : {}
-        }));
+        // 優先從 Supabase 獲取，如果失敗則從 SQLite 獲取
+        if (process.env.SUPABASE_URL) {
+            try {
+                const supabaseResults = await supabaseOps.getUserResults(session_id);
+                formattedResults = supabaseResults.map(r => ({
+                    id: r.id,
+                    timestamp: r.ts,
+                    result_name: r.result_name,
+                    scores: r.score_json || {}
+                }));
+            } catch (error) {
+                console.log('Supabase 查詢失敗，回退到 SQLite:', error.message);
+            }
+        }
+
+        // 如果 Supabase 沒有數據，從 SQLite 獲取
+        if (formattedResults.length === 0) {
+            const userResults = db.prepare(`
+                SELECT * FROM results 
+                WHERE session_id = ? 
+                ORDER BY ts DESC
+            `).all(session_id);
+
+            formattedResults = userResults.map(r => ({
+                id: r.id,
+                timestamp: r.ts,
+                result_name: r.result_name,
+                scores: r.score_json ? JSON.parse(r.score_json) : {}
+            }));
+        }
 
         res.json({
             session_id,

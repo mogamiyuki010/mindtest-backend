@@ -26,6 +26,7 @@
         "url": "https://github.com/mogamiyuki010/mindtest"
     },
     "dependencies": {
+        "@supabase/supabase-js": "^2.39.0",
         "better-sqlite3": "^12.4.1",
         "cookie-parser": "^1.4.7",
         "cors": "^2.8.5",
