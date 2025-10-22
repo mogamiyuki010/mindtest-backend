@@ -40,6 +40,8 @@ db.pragma('synchronous = NORMAL');
 if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
   console.log('🔄 初始化 Supabase 連接...');
   initSupabaseTables();
+} else {
+  console.log('⚠️  Supabase 環境變數未設定，將使用本地 SQLite');
 }
 
 // 創建表格
@@ -68,12 +70,17 @@ app.use(cors({
     origin: [
         "https://mogamiyuki010.github.io",
         "https://mogamiyuki010.github.io/mindtest",
+        "https://mogamiyuki010.github.io/mindtest/",
         "https://mindtest-backend.onrender.com",  // RENDER 部署域名
         "http://localhost:3000",  // 本地開發
-        "https://localhost:3000"   // 本地 HTTPS
+        "https://localhost:3000",   // 本地 HTTPS
+        "http://localhost:8080",   // 本地開發備用端口
+        "https://localhost:8080"    // 本地 HTTPS 備用端口
     ],
-    methods: ["GET", "POST", "PUT", "DELETE"],
-    credentials: true
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    credentials: true,
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    optionsSuccessStatus: 200
 }));
 
 app.use(cookieParser());
@@ -229,7 +236,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // ✅ 1. 查詢所有事件 (GET /api/events) - 供 admin.html 讀取
-app.get('/api/events', (req, res) => {
+app.get('/api/events', async (req, res) => {
     try {
         const { start = null, end = null, page = 1, pageSize = 100 } = req.query;
         const limit = Math.min(Number(pageSize) || 100, 500);
@@ -243,16 +250,47 @@ app.get('/api/events', (req, res) => {
             offset
         };
 
-        const items = stQueryEvents.all(params).map(r => ({
-            id: r.id,
-            timestamp: r.ts,
-            event_name: r.type,
-            user_id: r.session_id, 
-            session_id: r.session_id,
-            page: r.page,
-            // 關鍵修正：將 payload 字符串解析為 JS Object
-            properties: r.payload ? JSON.parse(r.payload) : {} 
-        }));
+        let items = [];
+
+        // 優先從 Supabase 獲取，如果失敗則從 SQLite 獲取
+        if (process.env.SUPABASE_URL) {
+            try {
+                const supabaseItems = await supabaseOps.queryEvents(params);
+                items = supabaseItems.map(r => ({
+                    id: r.id,
+                    timestamp: r.ts,
+                    event_name: r.type,
+                    user_id: r.session_id, 
+                    session_id: r.session_id,
+                    page: r.page,
+                    properties: r.payload || {}
+                }));
+                console.log('✅ 從 Supabase 獲取事件數據');
+            } catch (error) {
+                console.log('⚠️  Supabase 查詢失敗，回退到 SQLite:', error.message);
+                // 回退到 SQLite
+                items = stQueryEvents.all(params).map(r => ({
+                    id: r.id,
+                    timestamp: r.ts,
+                    event_name: r.type,
+                    user_id: r.session_id, 
+                    session_id: r.session_id,
+                    page: r.page,
+                    properties: r.payload ? JSON.parse(r.payload) : {} 
+                }));
+            }
+        } else {
+            // 直接使用 SQLite
+            items = stQueryEvents.all(params).map(r => ({
+                id: r.id,
+                timestamp: r.ts,
+                event_name: r.type,
+                user_id: r.session_id, 
+                session_id: r.session_id,
+                page: r.page,
+                properties: r.payload ? JSON.parse(r.payload) : {} 
+            }));
+        }
 
         res.json(items);
     } catch (error) {
@@ -262,7 +300,7 @@ app.get('/api/events', (req, res) => {
 });
 
 // ✅ 2. 查詢所有測驗結果 (GET /api/results) - 供 admin.html 讀取
-app.get('/api/results', (req, res) => {
+app.get('/api/results', async (req, res) => {
     try {
         const { start = null, end = null, page = 1, pageSize = 100 } = req.query;
         const limit = Math.min(Number(pageSize) || 100, 500);
@@ -276,15 +314,44 @@ app.get('/api/results', (req, res) => {
             offset
         };
 
-        const items = stQueryResults.all(params).map(r => ({
-            id: r.id,
-            timestamp: r.ts,
-            user_id: r.session_id,
-            session_id: r.session_id,
-            result: r.result_name,
-            // 關鍵修正：將 score_json 字符串解析為 JS Object
-            scores: r.score_json ? JSON.parse(r.score_json) : {} 
-        }));
+        let items = [];
+
+        // 優先從 Supabase 獲取，如果失敗則從 SQLite 獲取
+        if (process.env.SUPABASE_URL) {
+            try {
+                const supabaseItems = await supabaseOps.queryResults(params);
+                items = supabaseItems.map(r => ({
+                    id: r.id,
+                    timestamp: r.ts,
+                    user_id: r.session_id,
+                    session_id: r.session_id,
+                    result: r.result_name,
+                    scores: r.score_json || {}
+                }));
+                console.log('✅ 從 Supabase 獲取結果數據');
+            } catch (error) {
+                console.log('⚠️  Supabase 查詢失敗，回退到 SQLite:', error.message);
+                // 回退到 SQLite
+                items = stQueryResults.all(params).map(r => ({
+                    id: r.id,
+                    timestamp: r.ts,
+                    user_id: r.session_id,
+                    session_id: r.session_id,
+                    result: r.result_name,
+                    scores: r.score_json ? JSON.parse(r.score_json) : {} 
+                }));
+            }
+        } else {
+            // 直接使用 SQLite
+            items = stQueryResults.all(params).map(r => ({
+                id: r.id,
+                timestamp: r.ts,
+                user_id: r.session_id,
+                session_id: r.session_id,
+                result: r.result_name,
+                scores: r.score_json ? JSON.parse(r.score_json) : {} 
+            }));
+        }
 
         res.json(items);
     } catch (error) {
@@ -303,32 +370,75 @@ app.post('/api/events', (req, res) => {
 
         const items = Array.isArray(body.batch) ? body.batch : [body];
         
-        // 使用事務 (Transaction) 提高批量寫入性能
-        const insertMany = db.transaction((arr) => {
-            for (const it of arr) {
-                const page = it.page || it.properties?.page || '';
-                const type = it.type || it.event || (it.properties?.event) || 'custom';
-                const payload = it.payload || it.properties || {};
+        // 優先寫入 Supabase，如果失敗則寫入 SQLite
+        if (process.env.SUPABASE_URL) {
+            try {
+                // 批量寫入 Supabase
+                for (const it of items) {
+                    const page = it.page || it.properties?.page || '';
+                    const type = it.type || it.event || (it.properties?.event) || 'custom';
+                    const payload = it.payload || it.properties || {};
 
-                const eventData = {
-                    id: nanoid(),
-                    ts: now,
-                    session_id,
-                    ip: String(ip),
-                    page: String(page),
-                    type: String(type),
-                    payload: JSON.stringify(payload)
-                };
+                    const eventData = {
+                        id: nanoid(),
+                        ts: now,
+                        session_id,
+                        ip: String(ip),
+                        page: String(page),
+                        type: String(type),
+                        payload: JSON.stringify(payload)
+                    };
 
-                // 寫入 SQLite
-                stInsertEvent.run(eventData);
+                    await supabaseOps.insertEvent(eventData);
+                }
+                console.log('✅ 事件已寫入 Supabase');
+            } catch (error) {
+                console.log('⚠️  Supabase 寫入失敗，回退到 SQLite:', error.message);
+                // 回退到 SQLite
+                const insertMany = db.transaction((arr) => {
+                    for (const it of arr) {
+                        const page = it.page || it.properties?.page || '';
+                        const type = it.type || it.event || (it.properties?.event) || 'custom';
+                        const payload = it.payload || it.properties || {};
 
-                // 同時寫入 Supabase
-                supabaseOps.insertEvent(eventData);
+                        const eventData = {
+                            id: nanoid(),
+                            ts: now,
+                            session_id,
+                            ip: String(ip),
+                            page: String(page),
+                            type: String(type),
+                            payload: JSON.stringify(payload)
+                        };
+
+                        stInsertEvent.run(eventData);
+                    }
+                });
+                insertMany(items);
             }
-        });
+        } else {
+            // 直接寫入 SQLite
+            const insertMany = db.transaction((arr) => {
+                for (const it of arr) {
+                    const page = it.page || it.properties?.page || '';
+                    const type = it.type || it.event || (it.properties?.event) || 'custom';
+                    const payload = it.payload || it.properties || {};
 
-        insertMany(items);
+                    const eventData = {
+                        id: nanoid(),
+                        ts: now,
+                        session_id,
+                        ip: String(ip),
+                        page: String(page),
+                        type: String(type),
+                        payload: JSON.stringify(payload)
+                    };
+
+                    stInsertEvent.run(eventData);
+                }
+            });
+            insertMany(items);
+        }
         res.json({ ok: true, inserted: items.length });
     } catch (error) {
         console.error("Error inserting events:", error.message);
@@ -337,7 +447,7 @@ app.post('/api/events', (req, res) => {
 });
 
 // 4. 儲存測驗結果 POST - 供前端上傳數據
-app.post('/api/results', (req, res) => {
+app.post('/api/results', async (req, res) => {
     try {
         const now = new Date().toISOString();
         const session_id = req.cookies.session_id;
@@ -351,11 +461,20 @@ app.post('/api/results', (req, res) => {
             score_json: JSON.stringify(scores)
         };
 
-        // 寫入 SQLite
-        stInsertResult.run(resultData);
-
-        // 同時寫入 Supabase
-        supabaseOps.insertResult(resultData);
+        // 優先寫入 Supabase，如果失敗則寫入 SQLite
+        if (process.env.SUPABASE_URL) {
+            try {
+                await supabaseOps.insertResult(resultData);
+                console.log('✅ 結果已寫入 Supabase');
+            } catch (error) {
+                console.log('⚠️  Supabase 寫入失敗，回退到 SQLite:', error.message);
+                // 回退到 SQLite
+                stInsertResult.run(resultData);
+            }
+        } else {
+            // 直接寫入 SQLite
+            stInsertResult.run(resultData);
+        }
 
         res.json({ ok: true });
     } catch (error) {
